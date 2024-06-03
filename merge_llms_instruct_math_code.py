@@ -8,19 +8,29 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from model_merging_methods.merging_methods import MergingMethod
 from utils.utils import set_random_seed, smart_tokenizer_and_embedding_resize
-from inference_llms_instruct_math_code import create_llm, test_alpaca_eval, test_gsm8k, test_hendrycks_math, test_human_eval, test_mbpp
+# from inference_llms_instruct_math_code import create_llm, test_alpaca_eval, test_gsm8k, test_hendrycks_math, test_human_eval, test_mbpp
 from utils.load_config import cache_dir
 
 
+# task_model_mapping_dict = {
+#     "instruct": "WizardLM-13B-V1.2",
+#     "math": "WizardMath-13B-V1.0",
+#     "code": "llama-2-13b-code-alpaca"
+# }
+# finetuned_model_backbone_mapping_dict = {
+#     "WizardLM-13B-V1.2": "Llama-2-13b-hf",
+#     "WizardMath-13B-V1.0": "Llama-2-13b-hf",
+#     "llama-2-13b-code-alpaca": "Llama-2-13b-hf"
+# }
+
 task_model_mapping_dict = {
-    "instruct": "WizardLM-13B-V1.2",
-    "math": "WizardMath-13B-V1.0",
-    "code": "llama-2-13b-code-alpaca"
+    "long-context": "MistralLite",
+    "reasoning": "Eurus-7b-sft"
 }
+
 finetuned_model_backbone_mapping_dict = {
-    "WizardLM-13B-V1.2": "Llama-2-13b-hf",
-    "WizardMath-13B-V1.0": "Llama-2-13b-hf",
-    "llama-2-13b-code-alpaca": "Llama-2-13b-hf"
+    "MistralLite": "Mistral-7B-v0.1",
+    "Eurus-7b-sft": "Mistral-7B-v0.1"
 }
 
 
@@ -50,30 +60,41 @@ def get_merge_performance(args: argparse.Namespace, finetuned_model_names: list,
     # set the pad_token of pretrained and finetuned tokenizer
     # note that WizardMath-70B-V1.0 adds two tokens {"<pad>": 32000, "[PAD]": 32001} with (32002, 8192) token embedding size
     # therefore, for WizardMath-70B-V1.0, we add one distinct pad_token "<pad>[PAD]" to reshape the token embedding size to (32001, 8192)
-    if "WizardMath-70B-V1.0" in finetuned_model_names:
+    # if "WizardMath-70B-V1.0" in finetuned_model_names:
+    #     smart_tokenizer_and_embedding_resize(
+    #         special_tokens_dict=dict(pad_token="<pad>[PAD]"),
+    #         model=pretrained_model,
+    #         tokenizer=pretrained_tokenizer,
+    #     )
+    #     for finetuned_model, finetuned_tokenizer in zip(models_to_merge, tokenizers):
+    #         smart_tokenizer_and_embedding_resize(
+    #             special_tokens_dict=dict(pad_token="<pad>[PAD]"),
+    #             model=finetuned_model,
+    #             tokenizer=finetuned_tokenizer,
+    #         )
+    # else:
+    #     smart_tokenizer_and_embedding_resize(
+    #         special_tokens_dict=dict(pad_token="[PAD]"),
+    #         model=pretrained_model,
+    #         tokenizer=pretrained_tokenizer,
+    #     )
+    #     for finetuned_model, finetuned_tokenizer in zip(models_to_merge, tokenizers):
+    #         smart_tokenizer_and_embedding_resize(
+    #             special_tokens_dict=dict(pad_token="[PAD]"),
+    #             model=finetuned_model,
+    #             tokenizer=finetuned_tokenizer,
+    #         )
+    smart_tokenizer_and_embedding_resize(
+        special_tokens_dict=dict(pad_token="[PAD]", additional_special_tokens=['<unk>', '<s>', '</s>',"<|assistant|>","<|prompter|>"]),
+        model=pretrained_model,
+        tokenizer=pretrained_tokenizer,
+    )
+    for finetuned_model, finetuned_tokenizer in zip(models_to_merge, tokenizers):
         smart_tokenizer_and_embedding_resize(
-            special_tokens_dict=dict(pad_token="<pad>[PAD]"),
-            model=pretrained_model,
-            tokenizer=pretrained_tokenizer,
+            special_tokens_dict=dict(pad_token="[PAD]", additional_special_tokens=['<unk>', '<s>', '</s>',"<|assistant|>","<|prompter|>"]),
+            model=finetuned_model,
+            tokenizer=finetuned_tokenizer,
         )
-        for finetuned_model, finetuned_tokenizer in zip(models_to_merge, tokenizers):
-            smart_tokenizer_and_embedding_resize(
-                special_tokens_dict=dict(pad_token="<pad>[PAD]"),
-                model=finetuned_model,
-                tokenizer=finetuned_tokenizer,
-            )
-    else:
-        smart_tokenizer_and_embedding_resize(
-            special_tokens_dict=dict(pad_token="[PAD]"),
-            model=pretrained_model,
-            tokenizer=pretrained_tokenizer,
-        )
-        for finetuned_model, finetuned_tokenizer in zip(models_to_merge, tokenizers):
-            smart_tokenizer_and_embedding_resize(
-                special_tokens_dict=dict(pad_token="[PAD]"),
-                model=finetuned_model,
-                tokenizer=finetuned_tokenizer,
-            )
 
     # set random seed to guarantee reproducibility
     set_random_seed(seed=0)
@@ -98,15 +119,22 @@ def get_merge_performance(args: argparse.Namespace, finetuned_model_names: list,
                                                    models_use_deepcopy=False)
 
     save_instruct_model_path = save_math_model_path = save_code_model_path = None
-    if args.merge_instruct:
-        save_instruct_model_path = f"./save_merge_models/{'_'.join(merge_task_names)}/instruct/{args.save_model_name}"
-    if args.merge_math:
-        save_math_model_path = f"./save_merge_models/{'_'.join(merge_task_names)}/math/{args.save_model_name}"
-    if args.merge_code:
-        save_code_model_path = f"./save_merge_models/{'_'.join(merge_task_names)}/code/{args.save_model_name}"
+    save_long_context_model_path = save_reasoning_model_path = None
+    # if args.merge_instruct:
+    #     save_instruct_model_path = f"./save_merge_models/{'_'.join(merge_task_names)}/instruct/{args.save_model_name}"
+    # if args.merge_math:
+    #     save_math_model_path = f"./save_merge_models/{'_'.join(merge_task_names)}/math/{args.save_model_name}"
+    # if args.merge_code:
+    #     save_code_model_path = f"./save_merge_models/{'_'.join(merge_task_names)}/code/{args.save_model_name}"
+    if args.merge_long_context:
+        save_long_context_model_path = f"./save_merge_models/{'_'.join(merge_task_names)}/long-context/{args.save_model_name}"
+    if args.merge_reasoning:
+        save_reasoning_model_path = f"./save_merge_models/{'_'.join(merge_task_names)}/reasoning/{args.save_model_name}"
+
 
     # since the tokenizers of different tasks are different, we need to save them (together with the model) separately
-    save_model_paths = [save_instruct_model_path, save_math_model_path, save_code_model_path]
+    #save_model_paths = [save_instruct_model_path, save_math_model_path, save_code_model_path]
+    save_model_paths = [save_long_context_model_path, save_reasoning_model_path]
     index = 0
     for save_model_path in save_model_paths:
         if save_model_path is not None:
@@ -117,52 +145,54 @@ def get_merge_performance(args: argparse.Namespace, finetuned_model_names: list,
     logger.info(f"models are saved")
     del merged_model, tokenizers
 
-    if save_instruct_model_path is not None:
-        logger.info(f"evaluating merged model on instruct task...")
-        llm = create_llm(finetuned_model_name=save_instruct_model_path, pretrained_model_name=args.pretrained_model_name,
-                         args=args, logger=logger, tensor_parallel_size=args.tensor_parallel_size,
-                         just_inference=True, save_model_path=None)
-        save_gen_results_folder = f"./save_gen_instruct_responses_results/{'_'.join(merge_task_names)}/alpaca_eval/{args.save_model_name}"
-        test_alpaca_eval(llm=llm, finetuned_model_name=save_instruct_model_path,
-                         args=args, logger=logger, start_index=args.start_index, end_index=args.end_index,
-                         save_model_path=None, save_gen_results_folder=save_gen_results_folder)
-
-    if save_math_model_path is not None:
-        logger.info(f"evaluating merged model on math task...")
-        llm = create_llm(finetuned_model_name=save_math_model_path, pretrained_model_name=args.pretrained_model_name,
-                         args=args, logger=logger, tensor_parallel_size=args.tensor_parallel_size,
-                         just_inference=True, save_model_path=None)
-        test_data_path = "math_code_data/gsm8k_test.jsonl"
-        test_gsm8k(llm=llm, test_data_path=test_data_path, args=args, logger=logger,
-                   start_index=args.start_index, end_index=args.end_index, save_model_path=None)
-        test_data_path = "math_code_data/MATH_test.jsonl"
-        test_hendrycks_math(llm=llm, test_data_path=test_data_path, args=args, logger=logger,
-                            start_index=args.start_index, end_index=args.end_index, save_model_path=None)
-
-    if save_code_model_path is not None:
-        logger.info(f"evaluating merged model on code task...")
-        llm = create_llm(finetuned_model_name=save_code_model_path, pretrained_model_name=args.pretrained_model_name,
-                         args=args, logger=logger, tensor_parallel_size=args.tensor_parallel_size,
-                         just_inference=True, save_model_path=None)
-        save_gen_results_folder = f"./save_gen_codes_results/{'_'.join(merge_task_names)}/human_eval/{args.save_model_name}"
-        test_human_eval(llm=llm, args=args, logger=logger, start_index=args.start_index, end_index=args.end_index,
-                        save_model_path=None, save_gen_results_folder=save_gen_results_folder)
-        save_gen_results_folder = f"./save_gen_codes_results/{'_'.join(merge_task_names)}/mbpp/{args.save_model_name}"
-        test_data_path = "math_code_data/mbpp.test.jsonl"
-        test_mbpp(llm=llm, test_data_path=test_data_path, args=args, logger=logger,
-                  start_index=args.start_index, end_index=args.end_index,
-                  save_model_path=None, save_gen_results_folder=save_gen_results_folder)
-
-    for save_model_path in save_model_paths:
-        if save_model_path is not None:
-            shutil.rmtree(save_model_path, ignore_errors=True)
-    logger.info(f"inference of merging method {args.merging_method_name} is completed")
+    # if save_instruct_model_path is not None:
+    #     logger.info(f"evaluating merged model on instruct task...")
+    #     llm = create_llm(finetuned_model_name=save_instruct_model_path, pretrained_model_name=args.pretrained_model_name,
+    #                      args=args, logger=logger, tensor_parallel_size=args.tensor_parallel_size,
+    #                      just_inference=True, save_model_path=None)
+    #     save_gen_results_folder = f"./save_gen_instruct_responses_results/{'_'.join(merge_task_names)}/alpaca_eval/{args.save_model_name}"
+    #     test_alpaca_eval(llm=llm, finetuned_model_name=save_instruct_model_path,
+    #                      args=args, logger=logger, start_index=args.start_index, end_index=args.end_index,
+    #                      save_model_path=None, save_gen_results_folder=save_gen_results_folder)
+    #
+    # if save_math_model_path is not None:
+    #     logger.info(f"evaluating merged model on math task...")
+    #     llm = create_llm(finetuned_model_name=save_math_model_path, pretrained_model_name=args.pretrained_model_name,
+    #                      args=args, logger=logger, tensor_parallel_size=args.tensor_parallel_size,
+    #                      just_inference=True, save_model_path=None)
+    #     test_data_path = "math_code_data/gsm8k_test.jsonl"
+    #     test_gsm8k(llm=llm, test_data_path=test_data_path, args=args, logger=logger,
+    #                start_index=args.start_index, end_index=args.end_index, save_model_path=None)
+    #     test_data_path = "math_code_data/MATH_test.jsonl"
+    #     test_hendrycks_math(llm=llm, test_data_path=test_data_path, args=args, logger=logger,
+    #                         start_index=args.start_index, end_index=args.end_index, save_model_path=None)
+    #
+    # if save_code_model_path is not None:
+    #     logger.info(f"evaluating merged model on code task...")
+    #     llm = create_llm(finetuned_model_name=save_code_model_path, pretrained_model_name=args.pretrained_model_name,
+    #                      args=args, logger=logger, tensor_parallel_size=args.tensor_parallel_size,
+    #                      just_inference=True, save_model_path=None)
+    #     save_gen_results_folder = f"./save_gen_codes_results/{'_'.join(merge_task_names)}/human_eval/{args.save_model_name}"
+    #     test_human_eval(llm=llm, args=args, logger=logger, start_index=args.start_index, end_index=args.end_index,
+    #                     save_model_path=None, save_gen_results_folder=save_gen_results_folder)
+    #     save_gen_results_folder = f"./save_gen_codes_results/{'_'.join(merge_task_names)}/mbpp/{args.save_model_name}"
+    #     test_data_path = "math_code_data/mbpp.test.jsonl"
+    #     test_mbpp(llm=llm, test_data_path=test_data_path, args=args, logger=logger,
+    #               start_index=args.start_index, end_index=args.end_index,
+    #               save_model_path=None, save_gen_results_folder=save_gen_results_folder)
+    #
+    # for save_model_path in save_model_paths:
+    #     if save_model_path is not None:
+    #         shutil.rmtree(save_model_path, ignore_errors=True)
+    # logger.info(f"inference of merging method {args.merging_method_name} is completed")
 
 
 parser = argparse.ArgumentParser("Interface for merging LLMs")
-parser.add_argument("--merge_instruct", action="store_true", default=False, help="whether to merge instruct model")
-parser.add_argument("--merge_math", action="store_true", default=False, help="whether to merge math model")
-parser.add_argument("--merge_code", action="store_true", default=False, help="whether to merge code model")
+# parser.add_argument("--merge_instruct", action="store_true", default=False, help="whether to merge instruct model")
+# parser.add_argument("--merge_math", action="store_true", default=False, help="whether to merge math model")
+# parser.add_argument("--merge_code", action="store_true", default=False, help="whether to merge code model")
+parser.add_argument("--merge_long_context", action="store_true", default=False, help="whether to merge long context model")
+parser.add_argument("--merge_reasoning", action="store_true", default=False, help="whether to merge reasoning model")
 parser.add_argument("--merging_method_name", type=str, default="average_merging", help="name of the method to merge models",
                     choices=["average_merging", "task_arithmetic", "mask_merging"])
 parser.add_argument("--scaling_coefficient", type=float, default=1.0, help="scaling coefficient to merge the task vector")
@@ -189,10 +219,12 @@ if __name__ == "__main__":
     logger = logging.getLogger()
     logger.setLevel(logging.DEBUG)
 
-    assert sum([args.merge_instruct, args.merge_math, args.merge_code]) >= 2, "should merge two tasks at least!"
+    # assert sum([args.merge_instruct, args.merge_math, args.merge_code]) >= 2, "should merge two tasks at least!"
     finetuned_model_names = []
     merge_task_names = []
-    for merge_flag, task_name in zip([args.merge_instruct, args.merge_math, args.merge_code], ["instruct", "math", "code"]):
+    # for merge_flag, task_name in zip([args.merge_instruct, args.merge_math, args.merge_code], ["instruct", "math", "code"]):
+    for merge_flag, task_name in zip([args.merge_long_context, args.merge_reasoning],
+                                     ["long-context", "reasoning"]):
         if merge_flag:
             finetuned_model_names.append(task_model_mapping_dict[task_name])
             merge_task_names.append(task_name)
