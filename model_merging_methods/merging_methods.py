@@ -3,10 +3,13 @@ from tqdm import tqdm
 import copy
 import torch
 import torch.nn as nn
+from utils.test_model import test_model_completion, prepare_model_from_cpu, load_model_from_checkpoint
 
 from model_merging_methods.task_vector import TaskVector
 from utils.utils import get_param_names_to_merge, get_modules_to_merge
-from model_merging_methods.mask_weights_utils import mask_model_weights
+from model_merging_methods.mask_weights_utils import mask_model_weights, mask_input_with_mask
+
+from utils.read_retrieval_head import read_retrieval_head
 
 
 class MergingMethod:
@@ -44,17 +47,20 @@ class MergingMethod:
         for model_to_merge in models_to_merge:
             param_dict = {param_name: param_value for param_name, param_value in model_to_merge.named_parameters()}
             # exclude parameter whose name matches element in exclude_param_names_regex
-            param_names_to_merge = get_param_names_to_merge(input_param_names=list(param_dict.keys()), exclude_param_names_regex=exclude_param_names_regex)
+            param_names_to_merge = get_param_names_to_merge(input_param_names=list(param_dict.keys()),
+                                                            exclude_param_names_regex=exclude_param_names_regex)
             for param_name in param_names_to_merge:
                 models_to_merge_param_dict[param_name].append(param_dict[param_name])
 
         with torch.no_grad():
             # average merging of individual models' parameters
-            averaged_params = {param_name: torch.stack(model_to_merge_param, dim=0).mean(dim=0) for param_name, model_to_merge_param in models_to_merge_param_dict.items()}
+            averaged_params = {param_name: torch.stack(model_to_merge_param, dim=0).mean(dim=0) for
+                               param_name, model_to_merge_param in models_to_merge_param_dict.items()}
 
         return averaged_params
 
-    def task_arithmetic(self, merged_model: nn.Module, models_to_merge: list, exclude_param_names_regex: list, scaling_coefficient: float = 1.0):
+    def task_arithmetic(self, merged_model: nn.Module, models_to_merge: list, exclude_param_names_regex: list,
+                        scaling_coefficient: float = 1.0):
         """
         task arithmetic method
         :param merged_model: nn.Module, the merged model
@@ -65,7 +71,9 @@ class MergingMethod:
         """
         assert isinstance(scaling_coefficient, float), "wrong type of scaling_coefficient, should be float!"
 
-        models_to_merge_task_vectors = [TaskVector(pretrained_model=merged_model, finetuned_model=model_to_merge, exclude_param_names_regex=exclude_param_names_regex) for model_to_merge in models_to_merge]
+        models_to_merge_task_vectors = [TaskVector(pretrained_model=merged_model, finetuned_model=model_to_merge,
+                                                   exclude_param_names_regex=exclude_param_names_regex) for
+                                        model_to_merge in models_to_merge]
 
         # iterate each individual model that needs to be merged
         with torch.no_grad():
@@ -75,11 +83,13 @@ class MergingMethod:
                 merged_task_vector = merged_task_vector + models_to_merge_task_vectors[index]
 
             # combine with parameters of the merged model based on scaling coefficient
-            merged_params = merged_task_vector.combine_with_pretrained_model(pretrained_model=merged_model, scaling_coefficient=scaling_coefficient)
+            merged_params = merged_task_vector.combine_with_pretrained_model(pretrained_model=merged_model,
+                                                                             scaling_coefficient=scaling_coefficient)
 
         return merged_params
 
-    def fisher_merging(self, models_to_merge: list, trainers: list, exclude_param_names_regex: list, nums_fisher_examples: list, fisher_scaling_coefficients: list = None,
+    def fisher_merging(self, models_to_merge: list, trainers: list, exclude_param_names_regex: list,
+                       nums_fisher_examples: list, fisher_scaling_coefficients: list = None,
                        normalize_fisher_weight: bool = True, minimal_fisher_weight: float = 1e-6):
         """
         fisher merging method
@@ -92,6 +102,7 @@ class MergingMethod:
         :param minimal_fisher_weight: float, the minimal value in fisher weights, used for tackling the potential numerical issues
         :return:
         """
+
         def get_param_squared_gradients(model: nn.Module, param_names_to_merge: list):
             """
             get the squared gradients of parameters
@@ -99,7 +110,8 @@ class MergingMethod:
             :param param_names_to_merge: list, list of parameter names that need to be merged
             :return:
             """
-            param_squared_gradients = {param_name: param_value.grad.detach() ** 2 for param_name, param_value in model.named_parameters() if param_name in param_names_to_merge}
+            param_squared_gradients = {param_name: param_value.grad.detach() ** 2 for param_name, param_value in
+                                       model.named_parameters() if param_name in param_names_to_merge}
             return param_squared_gradients
 
         def get_models_fisher_norm(models_to_merge_param_dict: dict, models_to_merge_fisher_weights_list: list):
@@ -116,19 +128,23 @@ class MergingMethod:
             # compute L2 norm over models for each parameter
             for param_name, _ in models_to_merge_param_dict.items():
                 # Tensor, shape (num_models_to_merge, *fisher_weight_shape)
-                models_fisher = torch.stack([model_to_merge_fisher_weights[param_name] for model_to_merge_fisher_weights in models_to_merge_fisher_weights_list], dim=0)
+                models_fisher = torch.stack(
+                    [model_to_merge_fisher_weights[param_name] for model_to_merge_fisher_weights in
+                     models_to_merge_fisher_weights_list], dim=0)
                 dims = [dim_idx for dim_idx in range(1, models_fisher.dim())]
                 # Tensor, shape (num_models_to_merge, ), compute L2 norm for each parameter
                 models_fisher_norm = torch.norm(models_fisher, dim=dims)
                 models_fisher_norm_dict[param_name] = models_fisher_norm
 
             # Tensor, shape (num_models_to_merge, num_parameters)
-            models_fisher_norm = torch.stack([models_fisher_norm for models_fisher_norm in models_fisher_norm_dict.values()], dim=1)
+            models_fisher_norm = torch.stack(
+                [models_fisher_norm for models_fisher_norm in models_fisher_norm_dict.values()], dim=1)
             # Tensor, shape (num_models_to_merge, ), compute L2 norm over all the parameters
             models_fisher_norm = torch.norm(models_fisher_norm, dim=1)
             return models_fisher_norm
 
-        def merging_with_fisher_weights(models_to_merge_param_dict: dict, models_to_merge_fisher_weights_list: list, fisher_scaling_coefficients: torch.Tensor,
+        def merging_with_fisher_weights(models_to_merge_param_dict: dict, models_to_merge_fisher_weights_list: list,
+                                        fisher_scaling_coefficients: torch.Tensor,
                                         normalize_fisher_weight: bool = True, minimal_fisher_weight: float = 1e-6):
             """
             merge parameters of different models with computed fisher weights
@@ -154,16 +170,20 @@ class MergingMethod:
                 param_values = torch.stack(param_value_list, dim=0)
                 # Tensor, shape (num_models_to_merge, *fisher_weight_shape), use minimal_fisher_weight to solve the potential numerical issues
                 models_to_merge_fisher_weights = torch.stack([model_to_merge_fisher_weights[param_name]
-                                                              for model_to_merge_fisher_weights in models_to_merge_fisher_weights_list], dim=0) + minimal_fisher_weight
+                                                              for model_to_merge_fisher_weights in
+                                                              models_to_merge_fisher_weights_list],
+                                                             dim=0) + minimal_fisher_weight
 
                 # Tensor, shape (num_models_to_merge, 1, 1, ...)
-                reshaped_scaling_coefficients = fisher_scaling_coefficients.reshape(-1, *[1 for _ in range(param_values.dim() - 1)]).to(param_values.device)
+                reshaped_scaling_coefficients = fisher_scaling_coefficients.reshape(-1, *[1 for _ in range(
+                    param_values.dim() - 1)]).to(param_values.device)
 
                 if normalize_fisher_weight:
                     # Tensor, shape (num_models_to_merge, )
                     _models_fisher_norm = 1.0 / (models_fisher_norm + minimal_fisher_weight)
                     normalized_models_fisher_norm = _models_fisher_norm / _models_fisher_norm.sum()
-                    normalized_models_fisher_norm = normalized_models_fisher_norm.reshape(-1, *[1 for _ in range(param_values.dim() - 1)])
+                    normalized_models_fisher_norm = normalized_models_fisher_norm.reshape(-1, *[1 for _ in range(
+                        param_values.dim() - 1)])
                     reshaped_scaling_coefficients = reshaped_scaling_coefficients * normalized_models_fisher_norm
 
                 # shape (*parameter_shape)
@@ -186,10 +206,12 @@ class MergingMethod:
 
         assert len(models_to_merge) == len(trainers) == len(nums_fisher_examples), "sizes of lists are not identical!"
 
-        for model_idx, (model_to_merge, trainer, num_fisher_examples) in enumerate(zip(models_to_merge, trainers, nums_fisher_examples)):
+        for model_idx, (model_to_merge, trainer, num_fisher_examples) in enumerate(
+                zip(models_to_merge, trainers, nums_fisher_examples)):
             param_dict = {param_name: param_value for param_name, param_value in model_to_merge.named_parameters()}
             # exclude parameter whose name matches element in exclude_param_names_regex
-            param_names_to_merge = get_param_names_to_merge(input_param_names=list(param_dict.keys()), exclude_param_names_regex=exclude_param_names_regex)
+            param_names_to_merge = get_param_names_to_merge(input_param_names=list(param_dict.keys()),
+                                                            exclude_param_names_regex=exclude_param_names_regex)
 
             for param_name in param_names_to_merge:
                 models_to_merge_param_dict[param_name].append(param_dict[param_name])
@@ -201,9 +223,11 @@ class MergingMethod:
             num_computed_examples = 0
             train_dataloader = trainer.get_train_dataloader()
             if num_fisher_examples % trainer._train_batch_size != 0:
-                print(f"warning: the number of examples for computing fisher cannot be fully divided by the batch size for model {model_idx}, "
-                      "which may lead to a slightly different number of the actually used examples.")
-            for step, inputs in tqdm(enumerate(train_dataloader), desc=f"computing fisher weights for model {model_idx}"):
+                print(
+                    f"warning: the number of examples for computing fisher cannot be fully divided by the batch size for model {model_idx}, "
+                    "which may lead to a slightly different number of the actually used examples.")
+            for step, inputs in tqdm(enumerate(train_dataloader),
+                                     desc=f"computing fisher weights for model {model_idx}"):
                 if num_computed_examples >= num_fisher_examples:
                     break
                 inputs = trainer._prepare_inputs(inputs)
@@ -217,7 +241,8 @@ class MergingMethod:
                     model_to_merge.zero_grad()
                     mse_loss.backward()
                     # dict, fisher weights of a batch
-                    batch_fisher_weights = get_param_squared_gradients(model=model_to_merge, param_names_to_merge=param_names_to_merge)
+                    batch_fisher_weights = get_param_squared_gradients(model=model_to_merge,
+                                                                       param_names_to_merge=param_names_to_merge)
                 # compute fisher weights for classification task
                 else:
                     # use detach() to detach from the computation graph
@@ -231,7 +256,8 @@ class MergingMethod:
                     model_to_merge.zero_grad()
                     sum_labels_expectations.backward()
                     # dict, fisher weights of a batch
-                    batch_fisher_weights = get_param_squared_gradients(model=model_to_merge, param_names_to_merge=param_names_to_merge)
+                    batch_fisher_weights = get_param_squared_gradients(model=model_to_merge,
+                                                                       param_names_to_merge=param_names_to_merge)
 
                 batches_fisher_weights_list.append(batch_fisher_weights)
                 num_computed_examples += trainer._train_batch_size
@@ -254,16 +280,22 @@ class MergingMethod:
         if fisher_scaling_coefficients is None:
             fisher_scaling_coefficients = torch.ones(len(models_to_merge)) / len(models_to_merge)
         else:
-            assert isinstance(fisher_scaling_coefficients, list), "wrong type of fisher_scaling_coefficients, should be list!"
-            assert len(fisher_scaling_coefficients) == len(models_to_merge), "mismatched length of fisher_scaling_coefficients!"
+            assert isinstance(fisher_scaling_coefficients,
+                              list), "wrong type of fisher_scaling_coefficients, should be list!"
+            assert len(fisher_scaling_coefficients) == len(
+                models_to_merge), "mismatched length of fisher_scaling_coefficients!"
             fisher_scaling_coefficients = torch.Tensor(fisher_scaling_coefficients)
         # merging with fisher weights
-        merged_params = merging_with_fisher_weights(models_to_merge_param_dict=models_to_merge_param_dict, models_to_merge_fisher_weights_list=models_to_merge_fisher_weights_list,
-                                                    fisher_scaling_coefficients=fisher_scaling_coefficients, normalize_fisher_weight=normalize_fisher_weight, minimal_fisher_weight=minimal_fisher_weight)
+        merged_params = merging_with_fisher_weights(models_to_merge_param_dict=models_to_merge_param_dict,
+                                                    models_to_merge_fisher_weights_list=models_to_merge_fisher_weights_list,
+                                                    fisher_scaling_coefficients=fisher_scaling_coefficients,
+                                                    normalize_fisher_weight=normalize_fisher_weight,
+                                                    minimal_fisher_weight=minimal_fisher_weight)
 
         return merged_params
 
-    def regmean_merging(self, models_to_merge: list, trainers: list, exclude_param_names_regex: list, nums_regmean_examples: list, reduce_non_diagonal_ratio: float = 1.0):
+    def regmean_merging(self, models_to_merge: list, trainers: list, exclude_param_names_regex: list,
+                        nums_regmean_examples: list, reduce_non_diagonal_ratio: float = 1.0):
         """
         regmean merging method
         :param models_to_merge: list, individual models that need to be merged
@@ -273,12 +305,14 @@ class MergingMethod:
         :param reduce_non_diagonal_ratio: float, reduce non-diagonal elements in regmean weights by multiplying this scalar
         :return:
         """
+
         def compute_regmean_weights(module_name: str):
             """
             compute the regmean weights, a hook function to deal with each module's input
             :param module_name: str, module name
             :return:
             """
+
             def hook(module: nn.Module, input: tuple, output: torch.Tensor):
                 # Tensor, shape (batch_size, sequence_length, hidden_dim)
                 x = input[0].detach()
@@ -293,9 +327,11 @@ class MergingMethod:
                     num_computed_examples[module_name] = x.shape[0]
                     num_actual_examples[module_name] = batch_num_actual_examples
                 else:
-                    regmean_weights[module_name] = (regmean_weights[module_name] * num_computed_examples[module_name] + xtx) / (num_computed_examples[module_name] + x.shape[0])
+                    regmean_weights[module_name] = (regmean_weights[module_name] * num_computed_examples[
+                        module_name] + xtx) / (num_computed_examples[module_name] + x.shape[0])
                     num_computed_examples[module_name] += x.shape[0]
                     num_actual_examples[module_name] += batch_num_actual_examples
+
             return hook
 
         def reduce_non_diagonal_elements(regmean_weights: torch.Tensor, reduce_non_diagonal_ratio: float):
@@ -306,13 +342,15 @@ class MergingMethod:
             :return:
             """
             # diagonal matrix with (1 - reduce_non_diagonal_ratio) as elements
-            diag_weights = torch.diag(torch.ones(regmean_weights.shape[0]) - reduce_non_diagonal_ratio).to(regmean_weights.device)
+            diag_weights = torch.diag(torch.ones(regmean_weights.shape[0]) - reduce_non_diagonal_ratio).to(
+                regmean_weights.device)
             # matrix with reduce_non_diagonal_ratio as elements
             non_diag_weights = torch.zeros_like(diag_weights).fill_(reduce_non_diagonal_ratio)
             # diagonal elements are unchanged, while non-diagonal elements are multiplied by reduce_non_diagonal_ratio
             return regmean_weights * (diag_weights + non_diag_weights)
 
-        def merging_with_regmean_weights(models_to_merge_param_dict: dict, models_to_merge_regmean_weights_list: list, reduce_non_diagonal_ratio: float = 1.0):
+        def merging_with_regmean_weights(models_to_merge_param_dict: dict, models_to_merge_regmean_weights_list: list,
+                                         reduce_non_diagonal_ratio: float = 1.0):
             """
             merge parameters of different models with computed regmean weights
             :param models_to_merge_param_dict: dict, dictionary of list, where key is the parameter name,
@@ -333,17 +371,21 @@ class MergingMethod:
                     if module_name in models_to_merge_regmean_weights_list[0].keys():
                         # two lists with length num_models_to_merge
                         param_multiplied_results, module_regmean_weights_list = [], []
-                        for model_idx, model_to_merge_regmean_weights in enumerate(models_to_merge_regmean_weights_list):
+                        for model_idx, model_to_merge_regmean_weights in enumerate(
+                                models_to_merge_regmean_weights_list):
                             # Tensor, shape (hidden_dim, hidden_dim)
                             module_regmean_weights = model_to_merge_regmean_weights[module_name]
 
                             # reduce non-diagonal elements
-                            module_regmean_weights = reduce_non_diagonal_elements(regmean_weights=module_regmean_weights, reduce_non_diagonal_ratio=reduce_non_diagonal_ratio)
+                            module_regmean_weights = reduce_non_diagonal_elements(
+                                regmean_weights=module_regmean_weights,
+                                reduce_non_diagonal_ratio=reduce_non_diagonal_ratio)
                             module_regmean_weights_list.append(module_regmean_weights)
 
                             model_to_merge_param = param_value_list[model_idx]
                             # since the weight shape of Linear module is (output_size, input_size), we need to transpose it
-                            param_multiplied_results.append(torch.matmul(module_regmean_weights, model_to_merge_param.transpose(0, 1)))
+                            param_multiplied_results.append(
+                                torch.matmul(module_regmean_weights, model_to_merge_param.transpose(0, 1)))
 
                         # sum up module_regmean_weights and param_multiplied_results over all individual models
                         sum_module_regmean_weights = sum(module_regmean_weights_list)
@@ -372,10 +414,12 @@ class MergingMethod:
 
         # iterate each individual model that needs to be merged
         with torch.no_grad():
-            for model_idx, (model_to_merge, trainer, num_regmean_examples) in enumerate(zip(models_to_merge, trainers, nums_regmean_examples)):
+            for model_idx, (model_to_merge, trainer, num_regmean_examples) in enumerate(
+                    zip(models_to_merge, trainers, nums_regmean_examples)):
                 param_dict = {param_name: param_value for param_name, param_value in model_to_merge.named_parameters()}
                 # exclude parameter whose name matches element in exclude_param_names_regex
-                param_names_to_merge = get_param_names_to_merge(input_param_names=list(param_dict.keys()), exclude_param_names_regex=exclude_param_names_regex)
+                param_names_to_merge = get_param_names_to_merge(input_param_names=list(param_dict.keys()),
+                                                                exclude_param_names_regex=exclude_param_names_regex)
 
                 for param_name in param_names_to_merge:
                     models_to_merge_param_dict[param_name].append(param_dict[param_name])
@@ -391,14 +435,17 @@ class MergingMethod:
 
                 for module_name, linear_module_to_merge in linear_modules_to_merge.items():
                     # register a hook in the forward process
-                    handle = linear_module_to_merge.register_forward_hook(compute_regmean_weights(module_name=module_name))
+                    handle = linear_module_to_merge.register_forward_hook(
+                        compute_regmean_weights(module_name=module_name))
                     handles.append(handle)
 
                 train_dataloader = trainer.get_train_dataloader()
                 if num_regmean_examples % trainer._train_batch_size != 0:
-                    print(f"warning: the number of examples for computing regmean cannot be fully divided by the batch size for model {model_idx}, "
-                          "which may lead to a slightly different number of the actually used examples.")
-                for step, inputs in tqdm(enumerate(train_dataloader), desc=f"computing regmean weights for model {model_idx}"):
+                    print(
+                        f"warning: the number of examples for computing regmean cannot be fully divided by the batch size for model {model_idx}, "
+                        "which may lead to a slightly different number of the actually used examples.")
+                for step, inputs in tqdm(enumerate(train_dataloader),
+                                         desc=f"computing regmean weights for model {model_idx}"):
                     if len(num_actual_examples) > 0 and list(num_actual_examples.values())[0] >= num_regmean_examples:
                         break
                     inputs = trainer._prepare_inputs(inputs)
@@ -410,12 +457,14 @@ class MergingMethod:
                 for handle in handles:
                     handle.remove()
             # merging with regmean weights
-            merged_params = merging_with_regmean_weights(models_to_merge_param_dict=models_to_merge_param_dict, models_to_merge_regmean_weights_list=models_to_merge_regmean_weights_list,
+            merged_params = merging_with_regmean_weights(models_to_merge_param_dict=models_to_merge_param_dict,
+                                                         models_to_merge_regmean_weights_list=models_to_merge_regmean_weights_list,
                                                          reduce_non_diagonal_ratio=reduce_non_diagonal_ratio)
 
         return merged_params
 
-    def ties_merging(self, merged_model: nn.Module, models_to_merge: list, exclude_param_names_regex: list, param_value_mask_rate: float = 0.8, scaling_coefficient: float = 1.0):
+    def ties_merging(self, merged_model: nn.Module, models_to_merge: list, exclude_param_names_regex: list,
+                     param_value_mask_rate: float = 0.8, scaling_coefficient: float = 1.0):
         """
         ties merging method
         :param merged_model: nn.Module, the merged model
@@ -425,6 +474,7 @@ class MergingMethod:
         :param scaling_coefficient: float, scaling coefficient to merge the task vectors
         :return:
         """
+
         def task_vector_param_dict_to_single_vector(task_vector: TaskVector):
             """
             convert parameter dictionary in task vector to a single vector
@@ -451,7 +501,8 @@ class MergingMethod:
 
             return sorted_task_vector_param_dict
 
-        def mask_smallest_magnitude_param_values(flattened_models_to_merge_param: torch.Tensor, param_value_mask_rate: float = 0.8):
+        def mask_smallest_magnitude_param_values(flattened_models_to_merge_param: torch.Tensor,
+                                                 param_value_mask_rate: float = 0.8):
             """
             mask the smallest-magnitude parameter values (set to zeros) based on parameter value mask rate
             :param flattened_models_to_merge_param: Tensor, shape (num_models_to_merge, num_total_params), flattened parameters of individual models that need to be merged
@@ -489,47 +540,62 @@ class MergingMethod:
             :return:
             """
             # Tensor, shape (num_models_to_merge, num_total_params), where True is for parameters that we want to preserve
-            param_to_preserve_mask = ((param_signs.unsqueeze(dim=0) > 0) & (flattened_models_to_merge_param > 0)) | ((param_signs.unsqueeze(dim=0) < 0) & (flattened_models_to_merge_param < 0))
+            param_to_preserve_mask = ((param_signs.unsqueeze(dim=0) > 0) & (flattened_models_to_merge_param > 0)) | (
+                        (param_signs.unsqueeze(dim=0) < 0) & (flattened_models_to_merge_param < 0))
             # Tensor, shape (num_models_to_merge, num_total_params), the preserved parameters
             param_to_preserve = flattened_models_to_merge_param * param_to_preserve_mask
 
             # Tensor, shape (num_total_params, ), the number of models whose parameters can be preserved
             num_models_param_preserved = (param_to_preserve != 0).sum(dim=0).float()
             # Tensor, shape (num_total_params, ), the averaged flattened parameters
-            merged_flattened_param = torch.sum(param_to_preserve, dim=0) / torch.clamp(num_models_param_preserved, min=1.0)
+            merged_flattened_param = torch.sum(param_to_preserve, dim=0) / torch.clamp(num_models_param_preserved,
+                                                                                       min=1.0)
 
             return merged_flattened_param
 
         assert isinstance(scaling_coefficient, float), "wrong type of scaling_coefficient, should be float!"
 
-        models_to_merge_task_vectors = [TaskVector(pretrained_model=merged_model, finetuned_model=model_to_merge, exclude_param_names_regex=exclude_param_names_regex) for model_to_merge in models_to_merge]
+        models_to_merge_task_vectors = [TaskVector(pretrained_model=merged_model, finetuned_model=model_to_merge,
+                                                   exclude_param_names_regex=exclude_param_names_regex) for
+                                        model_to_merge in models_to_merge]
 
-        flattened_models_to_merge_param = [task_vector_param_dict_to_single_vector(task_vector=task_vector) for task_vector in models_to_merge_task_vectors]
+        flattened_models_to_merge_param = [task_vector_param_dict_to_single_vector(task_vector=task_vector) for
+                                           task_vector in models_to_merge_task_vectors]
         # Tensor, shape (num_models_to_merge, num_total_params), flattened parameters of individual models that need to be merged
         flattened_models_to_merge_param = torch.vstack(flattened_models_to_merge_param)
 
         with torch.no_grad():
             # Tensor, shape (num_models_to_merge, num_total_params), mask the smallest-magnitude parameter values using param_value_mask_rate
-            flattened_models_to_merge_param = mask_smallest_magnitude_param_values(flattened_models_to_merge_param=flattened_models_to_merge_param, param_value_mask_rate=param_value_mask_rate)
+            flattened_models_to_merge_param = mask_smallest_magnitude_param_values(
+                flattened_models_to_merge_param=flattened_models_to_merge_param,
+                param_value_mask_rate=param_value_mask_rate)
 
             # Tensor, shape (num_total_params, ), get the signs for each parameter in flattened_models_to_merge_param
             param_signs = get_param_signs(flattened_models_to_merge_param=flattened_models_to_merge_param)
 
             # Tensor, shape (num_total_params, ), disjoint merge
-            merged_flattened_param = disjoint_merge(flattened_models_to_merge_param=flattened_models_to_merge_param, param_signs=param_signs)
+            merged_flattened_param = disjoint_merge(flattened_models_to_merge_param=flattened_models_to_merge_param,
+                                                    param_signs=param_signs)
 
             # merged parameter dictionary
-            merged_task_vector_param_dict = single_vector_to_task_vector_param_dict(single_vector=merged_flattened_param, task_vector=models_to_merge_task_vectors[0])
+            merged_task_vector_param_dict = single_vector_to_task_vector_param_dict(
+                single_vector=merged_flattened_param, task_vector=models_to_merge_task_vectors[0])
             merged_task_vector = TaskVector(task_vector_param_dict=merged_task_vector_param_dict)
             # combine with parameters of the merged model based on scaling coefficient
-            merged_params = merged_task_vector.combine_with_pretrained_model(pretrained_model=merged_model, scaling_coefficient=scaling_coefficient)
+            merged_params = merged_task_vector.combine_with_pretrained_model(pretrained_model=merged_model,
+                                                                             scaling_coefficient=scaling_coefficient)
 
         return merged_params
 
-    def merging_models(self, merged_model: nn.Module, models_to_merge: list, exclude_param_names_regex: list, trainers: list = None, scaling_coefficient: float = 1.0,
-                       nums_fisher_examples: list = None, fisher_scaling_coefficients: list = None, normalize_fisher_weight: bool = True, minimal_fisher_weight: float = 1e-6,
-                       nums_regmean_examples: list = None, reduce_non_diagonal_ratio: float = 1.0, param_value_mask_rate: float = 0.8,
-                       weight_format: str = "delta_weight", weight_mask_rates: list = None, use_weight_rescale: bool = True, mask_strategy: str = "random",
+
+    def merging_models(self, merged_model: nn.Module, models_to_merge: list, exclude_param_names_regex: list,
+                       trainers: list = None, scaling_coefficient: float = 1.0,
+                       nums_fisher_examples: list = None, fisher_scaling_coefficients: list = None,
+                       normalize_fisher_weight: bool = True, minimal_fisher_weight: float = 1e-6,
+                       nums_regmean_examples: list = None, reduce_non_diagonal_ratio: float = 1.0,
+                       param_value_mask_rate: float = 0.8,
+                       weight_format: str = "delta_weight", weight_mask_rates: list = None,
+                       use_weight_rescale: bool = True, mask_strategy: str = "random",
                        mask_apply_method: str = "average_merging", models_use_deepcopy: bool = False):
         """
         model merging methods
@@ -554,20 +620,29 @@ class MergingMethod:
         :return:
         """
         if self.merging_method_name == "average_merging":
-            merged_params = self.average_merging(models_to_merge=models_to_merge, exclude_param_names_regex=exclude_param_names_regex)
+            merged_params = self.average_merging(models_to_merge=models_to_merge,
+                                                 exclude_param_names_regex=exclude_param_names_regex)
         elif self.merging_method_name == "task_arithmetic":
-            merged_params = self.task_arithmetic(merged_model=merged_model, models_to_merge=models_to_merge, exclude_param_names_regex=exclude_param_names_regex,
+            merged_params = self.task_arithmetic(merged_model=merged_model, models_to_merge=models_to_merge,
+                                                 exclude_param_names_regex=exclude_param_names_regex,
                                                  scaling_coefficient=scaling_coefficient)
         elif self.merging_method_name == "fisher_merging":
-            merged_params = self.fisher_merging(models_to_merge=models_to_merge, trainers=trainers, exclude_param_names_regex=exclude_param_names_regex,
-                                                nums_fisher_examples=nums_fisher_examples, fisher_scaling_coefficients=fisher_scaling_coefficients,
-                                                normalize_fisher_weight=normalize_fisher_weight, minimal_fisher_weight=minimal_fisher_weight)
+            merged_params = self.fisher_merging(models_to_merge=models_to_merge, trainers=trainers,
+                                                exclude_param_names_regex=exclude_param_names_regex,
+                                                nums_fisher_examples=nums_fisher_examples,
+                                                fisher_scaling_coefficients=fisher_scaling_coefficients,
+                                                normalize_fisher_weight=normalize_fisher_weight,
+                                                minimal_fisher_weight=minimal_fisher_weight)
         elif self.merging_method_name == "regmean_merging":
-            merged_params = self.regmean_merging(models_to_merge=models_to_merge, trainers=trainers, exclude_param_names_regex=exclude_param_names_regex,
-                                                 nums_regmean_examples=nums_regmean_examples, reduce_non_diagonal_ratio=reduce_non_diagonal_ratio)
+            merged_params = self.regmean_merging(models_to_merge=models_to_merge, trainers=trainers,
+                                                 exclude_param_names_regex=exclude_param_names_regex,
+                                                 nums_regmean_examples=nums_regmean_examples,
+                                                 reduce_non_diagonal_ratio=reduce_non_diagonal_ratio)
         elif self.merging_method_name == "ties_merging":
-            merged_params = self.ties_merging(merged_model=merged_model, models_to_merge=models_to_merge, exclude_param_names_regex=exclude_param_names_regex,
-                                              param_value_mask_rate=param_value_mask_rate, scaling_coefficient=scaling_coefficient)
+            merged_params = self.ties_merging(merged_model=merged_model, models_to_merge=models_to_merge,
+                                              exclude_param_names_regex=exclude_param_names_regex,
+                                              param_value_mask_rate=param_value_mask_rate,
+                                              scaling_coefficient=scaling_coefficient)
         elif self.merging_method_name == "mask_merging":
             with torch.no_grad():
                 if models_use_deepcopy:
@@ -576,35 +651,57 @@ class MergingMethod:
                     new_models_to_merge = models_to_merge
                 for new_model_to_merge, weight_mask_rate in zip(new_models_to_merge, weight_mask_rates):
                     # for each individual model, mask its weight
-                    masked_param_dict = mask_model_weights(finetuned_model=new_model_to_merge, pretrained_model=merged_model,
-                                                           exclude_param_names_regex=exclude_param_names_regex, weight_format=weight_format,
-                                                           weight_mask_rate=weight_mask_rate, use_weight_rescale=use_weight_rescale, mask_strategy=mask_strategy)
+                    masked_param_dict = mask_model_weights(finetuned_model=new_model_to_merge,
+                                                           pretrained_model=merged_model,
+                                                           exclude_param_names_regex=exclude_param_names_regex,
+                                                           weight_format=weight_format,
+                                                           weight_mask_rate=weight_mask_rate,
+                                                           use_weight_rescale=use_weight_rescale,
+                                                           mask_strategy=mask_strategy)
                     self.copy_params_to_model(params=masked_param_dict, model=new_model_to_merge)
             if mask_apply_method == "average_merging":
-                merged_params = self.average_merging(models_to_merge=new_models_to_merge, exclude_param_names_regex=exclude_param_names_regex)
+                merged_params = self.average_merging(models_to_merge=new_models_to_merge,
+                                                     exclude_param_names_regex=exclude_param_names_regex)
             elif mask_apply_method == "task_arithmetic":
-                merged_params = self.task_arithmetic(merged_model=merged_model, models_to_merge=new_models_to_merge, exclude_param_names_regex=exclude_param_names_regex,
+                merged_params = self.task_arithmetic(merged_model=merged_model, models_to_merge=new_models_to_merge,
+                                                     exclude_param_names_regex=exclude_param_names_regex,
                                                      scaling_coefficient=scaling_coefficient)
             elif mask_apply_method == "fisher_merging":
-                merged_params = self.fisher_merging(models_to_merge=new_models_to_merge, trainers=trainers, exclude_param_names_regex=exclude_param_names_regex,
-                                                    nums_fisher_examples=nums_fisher_examples, fisher_scaling_coefficients=fisher_scaling_coefficients,
-                                                    normalize_fisher_weight=normalize_fisher_weight, minimal_fisher_weight=minimal_fisher_weight)
+                merged_params = self.fisher_merging(models_to_merge=new_models_to_merge, trainers=trainers,
+                                                    exclude_param_names_regex=exclude_param_names_regex,
+                                                    nums_fisher_examples=nums_fisher_examples,
+                                                    fisher_scaling_coefficients=fisher_scaling_coefficients,
+                                                    normalize_fisher_weight=normalize_fisher_weight,
+                                                    minimal_fisher_weight=minimal_fisher_weight)
             elif mask_apply_method == "regmean_merging":
-                merged_params = self.regmean_merging(models_to_merge=new_models_to_merge, trainers=trainers, exclude_param_names_regex=exclude_param_names_regex,
-                                                     nums_regmean_examples=nums_regmean_examples, reduce_non_diagonal_ratio=reduce_non_diagonal_ratio)
+                merged_params = self.regmean_merging(models_to_merge=new_models_to_merge, trainers=trainers,
+                                                     exclude_param_names_regex=exclude_param_names_regex,
+                                                     nums_regmean_examples=nums_regmean_examples,
+                                                     reduce_non_diagonal_ratio=reduce_non_diagonal_ratio)
             elif mask_apply_method == "ties_merging":
-                merged_params = self.ties_merging(merged_model=merged_model, models_to_merge=new_models_to_merge, exclude_param_names_regex=exclude_param_names_regex,
-                                                  param_value_mask_rate=param_value_mask_rate, scaling_coefficient=scaling_coefficient)
+                merged_params = self.ties_merging(merged_model=merged_model, models_to_merge=new_models_to_merge,
+                                                  exclude_param_names_regex=exclude_param_names_regex,
+                                                  param_value_mask_rate=param_value_mask_rate,
+                                                  scaling_coefficient=scaling_coefficient)
             else:
                 raise NotImplementedError(f"unsupported for mask_apply_method {mask_apply_method}!")
+        elif self.merging_method_name == "retrieval_head_merging":
+            merged_params = self.retrieval_head_merging(merged_model=merged_model,
+                                                        models_to_merge=models_to_merge,
+                                                        exclude_param_names_regex=exclude_param_names_regex)
+
         else:
             raise NotImplementedError(f"unsupported for merging_method_name {self.merging_method_name}!")
         return merged_params
 
-    def get_merged_model(self, merged_model: nn.Module, models_to_merge: list, exclude_param_names_regex: list, trainers: list = None, scaling_coefficient: float = 1.0,
-                         nums_fisher_examples: list = None, fisher_scaling_coefficients: list = None, normalize_fisher_weight: bool = True, minimal_fisher_weight: float = 1e-6,
-                         nums_regmean_examples: list = None, reduce_non_diagonal_ratio: float = 1.0, param_value_mask_rate: float = 0.8,
-                         weight_format: str = "delta_weight", weight_mask_rates: list = None, use_weight_rescale: bool = True, mask_strategy: str = "random",
+    def get_merged_model(self, merged_model: nn.Module, models_to_merge: list, exclude_param_names_regex: list,
+                         trainers: list = None, scaling_coefficient: float = 1.0,
+                         nums_fisher_examples: list = None, fisher_scaling_coefficients: list = None,
+                         normalize_fisher_weight: bool = True, minimal_fisher_weight: float = 1e-6,
+                         nums_regmean_examples: list = None, reduce_non_diagonal_ratio: float = 1.0,
+                         param_value_mask_rate: float = 0.8,
+                         weight_format: str = "delta_weight", weight_mask_rates: list = None,
+                         use_weight_rescale: bool = True, mask_strategy: str = "random",
                          mask_apply_method: str = "average_merging", models_use_deepcopy: bool = False):
         """
         merge the parameters of models_to_merge to merged_model
@@ -629,12 +726,20 @@ class MergingMethod:
         :return:
         """
         # merged_params, dict of parameters
-        merged_params = self.merging_models(merged_model=merged_model, models_to_merge=models_to_merge, exclude_param_names_regex=exclude_param_names_regex, trainers=trainers,
-                                            nums_fisher_examples=nums_fisher_examples, scaling_coefficient=scaling_coefficient, fisher_scaling_coefficients=fisher_scaling_coefficients,
-                                            normalize_fisher_weight=normalize_fisher_weight, minimal_fisher_weight=minimal_fisher_weight,
-                                            nums_regmean_examples=nums_regmean_examples, reduce_non_diagonal_ratio=reduce_non_diagonal_ratio, param_value_mask_rate=param_value_mask_rate,
-                                            weight_format=weight_format, weight_mask_rates=weight_mask_rates, use_weight_rescale=use_weight_rescale, mask_strategy=mask_strategy,
-                                            mask_apply_method=mask_apply_method, models_use_deepcopy=models_use_deepcopy)
+        merged_params = self.merging_models(merged_model=merged_model, models_to_merge=models_to_merge,
+                                            exclude_param_names_regex=exclude_param_names_regex, trainers=trainers,
+                                            nums_fisher_examples=nums_fisher_examples,
+                                            scaling_coefficient=scaling_coefficient,
+                                            fisher_scaling_coefficients=fisher_scaling_coefficients,
+                                            normalize_fisher_weight=normalize_fisher_weight,
+                                            minimal_fisher_weight=minimal_fisher_weight,
+                                            nums_regmean_examples=nums_regmean_examples,
+                                            reduce_non_diagonal_ratio=reduce_non_diagonal_ratio,
+                                            param_value_mask_rate=param_value_mask_rate,
+                                            weight_format=weight_format, weight_mask_rates=weight_mask_rates,
+                                            use_weight_rescale=use_weight_rescale, mask_strategy=mask_strategy,
+                                            mask_apply_method=mask_apply_method,
+                                            models_use_deepcopy=models_use_deepcopy)
         self.copy_params_to_model(params=merged_params, model=merged_model)
 
         return merged_model

@@ -194,7 +194,7 @@ parser = argparse.ArgumentParser("Interface for merging LLMs")
 parser.add_argument("--merge_long_context", action="store_true", default=False, help="whether to merge long context model")
 parser.add_argument("--merge_reasoning", action="store_true", default=False, help="whether to merge reasoning model")
 parser.add_argument("--merging_method_name", type=str, default="average_merging", help="name of the method to merge models",
-                    choices=["average_merging", "task_arithmetic", "mask_merging"])
+                    choices=["average_merging", "task_arithmetic", "mask_merging", "retrieval_head_merging"])
 parser.add_argument("--scaling_coefficient", type=float, default=1.0, help="scaling coefficient to merge the task vector")
 parser.add_argument("--weight_format", type=str, help="the format of weights to be masked", default="delta_weight", choices=["finetuned_weight", "delta_weight"])
 parser.add_argument("--weight_mask_rate", type=float, default=0.1, help="weight mask rate")
@@ -238,8 +238,10 @@ if __name__ == "__main__":
         args.save_model_name = f"{args.merging_method_name}"
     elif args.merging_method_name == "task_arithmetic":
         args.save_model_name = f"{args.merging_method_name}_scaling_coefficient_{args.scaling_coefficient}"
+    elif args.merging_method_name == "retrieval_head_merging":
+        args.save_model_name = f"{args.merging_method_name}_rh"
     else:
-        assert args.merging_method_name == "mask_merging"
+        # assert args.merging_method_name == "mask_merging"
         if args.mask_apply_method == "average_merging":
             mask_apply_method_name = f"{args.mask_apply_method}"
         else:
@@ -279,4 +281,4 @@ if __name__ == "__main__":
     get_merge_performance(args=args, finetuned_model_names=finetuned_model_names, merge_task_names=merge_task_names, models_to_merge=models_to_merge,
                           trainers=[None for _ in range(len(finetuned_model_names))], logger=logger, merging_method=merging_method, tokenizers=finetuned_tokenizers)
 
-    sys.exit()
+    # sys.exit()
