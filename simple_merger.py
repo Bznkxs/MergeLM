@@ -6,20 +6,26 @@ import logging
 import time
 import json
 from transformers import AutoModelForCausalLM, AutoTokenizer
-# sentencepiece, protobuf
-# from model_merging_methods.merging_methods import MergingMethod
+# REQUIRES sentencepiece, protobuf
+
 import torch
 import numpy as np
 import random
-# from model_merging_methods.task_vector import TaskVector
-# from utils.utils import get_param_names_to_merge, get_modules_to_merge
-# from utils.read_retrieval_head import read_retrieval_head
-# from model_merging_methods.mask_weights_utils import mask_model_weights, mask_input_with_mask
-# from utils.test_model import test_model_completion, prepare_model_from_cpu, load_model_from_checkpoint
+
+# The following are already copied from the original MergeLM code:
+## from model_merging_methods.merging_methods import MergingMethod
+## from model_merging_methods.task_vector import TaskVector
+## from utils.utils import get_param_names_to_merge, get_modules_to_merge
+## from utils.read_retrieval_head import read_retrieval_head
+## from model_merging_methods.mask_weights_utils import mask_model_weights, mask_input_with_mask
+## from utils.test_model import test_model_completion, prepare_model_from_cpu, load_model_from_checkpoint
+
 
 random.seed(13245)
+
+
 # copy the functions from the original MergeLM code
-def copy_params_to_model(params, model):   # copying code from model_merging_methods.merging_methods
+def copy_params_to_model(params, model):  # copying code from model_merging_methods.merging_methods
     for param_name, param_value in model.named_parameters():
         if param_name in params:
             param_value.data.copy_(params[param_name])
@@ -50,10 +56,11 @@ def read_retrieval_head(retrieval_head_file="./Mistral-7B-v0.1.json", cutoff=0.1
         i = 0
         for i, (head, score) in enumerate(head_score_list):
             if score < cutoff:
-                print(f"{i} of {len(head_score_list)} heads ({i/len(head_score_list)}) have score at least {cutoff}")
+                print(f"{i} of {len(head_score_list)} heads ({i / len(head_score_list)}) have score at least {cutoff}")
                 return head_score_list[:i]
 
     return head_score_list
+
 
 def smart_tokenizer_and_embedding_resize(
         special_tokens_dict,
@@ -106,6 +113,7 @@ def mask_input_with_mask(input_tensor: torch.Tensor, mask: torch.Tensor, use_res
             masked_input_tensor = torch.div(input=masked_input_tensor, other=1 - mask_rate)
     return masked_input_tensor
 
+
 def test_model_completion(enc, model, prompt):  # test model output using prompt
     prompt = enc(prompt, return_tensors="pt")
     input_ids = prompt["input_ids"].to(model.device)
@@ -114,11 +122,13 @@ def test_model_completion(enc, model, prompt):  # test model output using prompt
         response = enc.decode(output[0][input_ids.shape[1]:], skip_special_tokens=True).strip()
     return response
 
+
 def diff(model1, model2):  # compare two models
     for name1, param1 in model1.named_parameters():
         param2 = model2.state_dict()[name1]
         if not torch.equal(param1, param2):
             print(name1, "different by", torch.norm(param1 - param2).item())
+
 
 ######################################
 # Main code
@@ -134,7 +144,7 @@ substitute_io = False
 resize_tokenizer = False  # DO NOT MODIFY THIS DURING DIFFERENT CALLS TO do_model_merge().
 linear_rescale = False
 linear_keep_rate = 0.5
-merging_method = "double_delta"   # "simple_substitution", "simple_delta", "double_delta", "double_sample", "double_sample_exclusive"
+merging_method = "double_delta"  # "simple_substitution", "simple_delta", "double_delta", "double_sample", "double_sample_exclusive"
 linear_merging_method = "double_delta"  # "simple_substitution", "simple_delta", "double_delta", "double_sample", "model_vector"
 double_sample_cnt = 120
 mlp_block_keep_configs = {  # if the value is False, the corresponding block is replaced with the model2's block
@@ -149,6 +159,8 @@ linear_rescale_fixed_rate = True
 num_key_value_groups = 4
 head_dim = 128
 num_layers = 32  # hard-coded
+
+
 #######################
 
 def base_name():
@@ -156,6 +168,7 @@ def base_name():
         return "m"
     else:
         return "lco"
+
 
 def get_merging_method():
     if merging_method in ["double_sample", "double_sample_exclusive"]:
@@ -176,8 +189,6 @@ if merge_model1:
 model2 = AutoModelForCausalLM.from_pretrained(model2_path)
 base_model = AutoModelForCausalLM.from_pretrained(base_model_path)
 
-
-
 if resize_tokenizer:
     smart_tokenizer_and_embedding_resize(
         special_tokens_dict=dict(pad_token="[PAD]",
@@ -188,7 +199,8 @@ if resize_tokenizer:
     if merge_model1:
         smart_tokenizer_and_embedding_resize(
             special_tokens_dict=dict(pad_token="[PAD]",
-                                     additional_special_tokens=['<unk>', '<s>', '</s>', "<|assistant|>", "<|prompter|>"]),
+                                     additional_special_tokens=['<unk>', '<s>', '</s>', "<|assistant|>",
+                                                                "<|prompter|>"]),
             model=model1,
             tokenizer=enc1,
         )
@@ -200,8 +212,9 @@ if resize_tokenizer:
         tokenizer=enc2,
     )
 
-
 model_template_path = base_model_path  # or model2_path
+
+
 # model_template_path = model2_path
 
 
@@ -234,18 +247,19 @@ def do_model_merge():
     # it is important to use the config of the model that we want to merge
     model_to_merge.config = model2.config
 
-
     if resize_tokenizer:
         smart_tokenizer_and_embedding_resize(
             special_tokens_dict=dict(pad_token="[PAD]",
-                                     additional_special_tokens=['<unk>', '<s>', '</s>', "<|assistant|>", "<|prompter|>"]),
+                                     additional_special_tokens=['<unk>', '<s>', '</s>', "<|assistant|>",
+                                                                "<|prompter|>"]),
             model=model_to_merge,
             tokenizer=enc_to_merge,
         )
 
     else:  # if we do not resize the tokenizer, we should keep the io layer
         if substitute_io:
-            print("Warning: tokenizer is not resized, but substitute_io is True. This is not feasible. Changing substitute_io to False.")
+            print(
+                "Warning: tokenizer is not resized, but substitute_io is True. This is not feasible. Changing substitute_io to False.")
             substitute_io = False
 
     model_to_merge.config.vocab_size = enc_to_merge.vocab_size
@@ -282,7 +296,8 @@ def do_model_merge():
         else:
             retrieval_head_kwargs = {"cutoff": 0.00}
 
-        heads_to_keep_model1, head_indices_to_mask_kv1, head_indices_to_mask_q1 = get_kv_and_q_indices(**retrieval_head_kwargs)
+        heads_to_keep_model1, head_indices_to_mask_kv1, head_indices_to_mask_q1 = get_kv_and_q_indices(
+            **retrieval_head_kwargs)
 
     #####################
 
@@ -346,19 +361,24 @@ def do_model_merge():
                             masked_tensor1 = base_model_param_dict[param_name] + masked_delta1 + masked_delta
                             masked_tensor2 = None
                         else:
-                            masked_tensor1 = mask_input_with_mask(model1_param_dict[param_name], mask_rev, use_rescale=False, mask_rate=None)
-                            masked_tensor2 = mask_input_with_mask(masked_delta + base_model_param_dict[param_name], mask, use_rescale=False, mask_rate=None)
+                            masked_tensor1 = mask_input_with_mask(model1_param_dict[param_name], mask_rev,
+                                                                  use_rescale=False, mask_rate=None)
+                            masked_tensor2 = mask_input_with_mask(masked_delta + base_model_param_dict[param_name],
+                                                                  mask, use_rescale=False, mask_rate=None)
                     else:
                         # simple delta only
                         if merging_method != "simple_delta":
-                            print("Warning: when merge_model1 is False, the only supported merging_method is simple_delta. Changing merging_method to simple_delta.")
+                            print(
+                                "Warning: when merge_model1 is False, the only supported merging_method is simple_delta. Changing merging_method to simple_delta.")
                         masked_tensor1 = masked_delta
                         masked_tensor2 = base_model_param_dict[param_name]
                 else:
-                     # mask1 is the inverse of mask; this is the default technique
-                    masked_tensor1 = mask_input_with_mask(base_model_param_dict[param_name], mask_rev, use_rescale=False, mask_rate=None)
+                    # mask1 is the inverse of mask; this is the default technique
+                    masked_tensor1 = mask_input_with_mask(base_model_param_dict[param_name], mask_rev,
+                                                          use_rescale=False, mask_rate=None)
                     # masked_tensor1 = mask_input_with_mask(model1_param_dict[param_name], mask1, use_rescale=False, mask_rate=None)
-                    masked_tensor2 = mask_input_with_mask(model2_param_dict[param_name], mask, use_rescale=False, mask_rate=None)
+                    masked_tensor2 = mask_input_with_mask(model2_param_dict[param_name], mask, use_rescale=False,
+                                                          mask_rate=None)
                 merged_params[param_name] = (masked_tensor1, masked_tensor2)  # both are masked
             else:  # Dealing with other parameters
                 # # print("Else")
@@ -393,10 +413,12 @@ def do_model_merge():
                             #     floating_keep_rate = 0
                             # else:
                             #     floating_keep_rate = keep_rate
-                            floating_keep_rate = keep_rate * retrieval_head_distribution[layer_idx] * len(retrieval_head_distribution)
+                            floating_keep_rate = keep_rate * retrieval_head_distribution[layer_idx] * len(
+                                retrieval_head_distribution)
                         else:
                             floating_keep_rate = keep_rate
-                        print("Floating keep rate: ", floating_keep_rate, "for param_name: ", param_name, "layer_idx: ", layer_idx)
+                        print("Floating keep rate: ", floating_keep_rate, "for param_name: ", param_name, "layer_idx: ",
+                              layer_idx)
 
                         if floating_keep_rate == 0:
                             print("Warning: floating_keep_rate is 0. Not rescaling.")
@@ -404,9 +426,11 @@ def do_model_merge():
                         else:
                             mask = torch.rand_like(delta) < floating_keep_rate
                             if linear_rescale_fixed_rate:
-                                masked_delta = mask_input_with_mask(delta, mask, use_rescale=linear_rescale, mask_rate=keep_rate)
+                                masked_delta = mask_input_with_mask(delta, mask, use_rescale=linear_rescale,
+                                                                    mask_rate=keep_rate)
                             else:
-                                masked_delta = mask_input_with_mask(delta, mask, use_rescale=linear_rescale, mask_rate=None)
+                                masked_delta = mask_input_with_mask(delta, mask, use_rescale=linear_rescale,
+                                                                    mask_rate=None)
 
                         if merge_model1:
                             delta1 = model1_param_dict[param_name] - base_model_param_dict[param_name]
@@ -433,7 +457,8 @@ def do_model_merge():
 
                         else:
                             if linear_merging_method != "simple_delta":
-                                print("Warning: when merge_model1 is False, the only supported linear_merging_method is simple_delta. Changing linear_merging_method to simple_delta.")
+                                print("Warning: when merge_model1 is False, the only supported linear_merging_method "
+                                      "is simple_delta. Changing linear_merging_method to simple_delta.")
                             masked_tensor = base_model_param_dict[param_name] + masked_delta
                             merged_params[param_name] = (masked_tensor, None)
                 else:
@@ -450,9 +475,7 @@ def do_model_merge():
         else:
             merged_params1[k] = v1 + v2
 
-
     copy_params_to_model(params=merged_params1, model=model_to_merge)
-
 
     if save_model:
         save_path = (f"../models/{base_name()}_{cutoff}_keep_{len(retrieval_heads)}_"
@@ -466,14 +489,13 @@ def do_model_merge():
         enc_to_merge.save_pretrained(save_path)
         print("Model saved to: ", save_path)
 
+
 # diff(model_to_merge, model2)
 
-    # model_to_merge=model_to_merge.to("cuda")
-    # print(test_model_completion(enc_to_merge, model_to_merge, "The capital of the United States is") )
-    # print(test_model_completion(enc_to_merge, model_to_merge, "[User] Write a python code that solves the problem: given a list of numbers, find the maximum and minimum elements. Your code should be a function that takes a list as the only argument, and return a tuple, which consists of four numbers: the maximum value, the index where the first maximum value appears, the minimum value, and the index where the first minimum value appears. [Assistant]"))
-    # del model_to_merge
-
-
+# model_to_merge=model_to_merge.to("cuda")
+# print(test_model_completion(enc_to_merge, model_to_merge, "The capital of the United States is") )
+# print(test_model_completion(enc_to_merge, model_to_merge, "[User] Write a python code that solves the problem: given a list of numbers, find the maximum and minimum elements. Your code should be a function that takes a list as the only argument, and return a tuple, which consists of four numbers: the maximum value, the index where the first maximum value appears, the minimum value, and the index where the first minimum value appears. [Assistant]"))
+# del model_to_merge
 
 
 # base_model=base_model.to("cuda:1")
@@ -530,5 +552,6 @@ for cutoff in cutoffs:
 
                                                 print("=====================================")
                                                 do_model_merge()
-                                                print(f"Done with {cutoff}_{substitute_io}_{substitute_linear}_{linear_keep_rate}_{linear_rescale}_{merging_method}_{linear_merging_method}_{double_sample_cnt}_{mlp_block_keep_configs}")
+                                                print(
+                                                    f"Done with {cutoff}_{substitute_io}_{substitute_linear}_{linear_keep_rate}_{linear_rescale}_{merging_method}_{linear_merging_method}_{double_sample_cnt}_{mlp_block_keep_configs}")
                                                 print("=====================================")
