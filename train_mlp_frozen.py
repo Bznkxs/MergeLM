@@ -16,7 +16,7 @@
 # regular:
 accelerate launch train_mlp_frozen.py     \
     --model_name_or_path="../models/Mistral-7B-v0.1" \
-    --dataset_name="/gpfs/fs1/home/du/project/datasets/slimpajama_per_source_downsample/slimpajama_packed_65535_5b_per_source_down_sample_0.1.hf" \
+    --dataset_name="/gpfs/fs1/home/du/project/datasets/slimpajama_per_source_downsample/slimpajama_packed_32768_5b_per_source_down_sample_0.1.hf" \
     --dataset_text_field="text"    \
     --report_to="wandb"     \
     --attn_implementation="flash_attention_2"     \
@@ -34,6 +34,7 @@ accelerate launch train_mlp_frozen.py     \
     --save_steps=1   \
     --save_total_limit=20   \
     --dataloader_num_workers=4
+
 
 # peft:
 python examples/scripts/sft.py \
@@ -95,7 +96,7 @@ if TRL_USE_RICH:
 
 
 if __name__ == "__main__":
-    parser = TrlParser((SFTScriptArguments, SFTConfig, ModelConfig))
+    parser = TrlParser((SFTScriptArguments, SFTConfig, ModelConfig), ignore_extra_args=True)
     args, training_args, model_config = parser.parse_args_and_config()
 
     # Force use our print callback
@@ -115,12 +116,15 @@ if __name__ == "__main__":
         use_cache=False if training_args.gradient_checkpointing else True,
         device_map=get_kbit_device_map() if quantization_config is not None else None,
         quantization_config=quantization_config,
+
     )
     training_args.model_init_kwargs = None  # model_kwargs
     if training_args.gradient_checkpointing:
         training_args.gradient_checkpointing_kwargs = {"use_reentrant": False}
     tokenizer = AutoTokenizer.from_pretrained(model_config.model_name_or_path, use_fast=True)
     tokenizer.pad_token = tokenizer.eos_token
+    training_args.wandb_project = "long-context",  # args.alignment_experiments,
+    training_args.wandb_run_name = "Mistral-7B-64k"  # args.kto_ultrafeedback
 
     ################
     # Dataset
@@ -166,6 +170,7 @@ if __name__ == "__main__":
     model = AutoModelForCausalLM.from_pretrained(model_config.model_name_or_path, **modified_model_kwargs)
     # change model config rope theta
     model.config.rope_theta = 1000000
+    model.config.sliding_window = 4096
 
     # Freeze all mlp layers, io layers, and embeddings
     # for name, param in model.named_parameters():
