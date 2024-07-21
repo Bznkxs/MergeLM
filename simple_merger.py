@@ -33,7 +33,7 @@ def copy_params_to_model(params, model):  # copying code from model_merging_meth
             print(f"param_name {param_name} not in params")
 
 
-def read_retrieval_head(retrieval_head_file="./Mistral-7B-v0.1.json", cutoff=0.1, *args, **kwargs):
+def read_retrieval_head(retrieval_head_file="./Mistral-7B-32k-frozen_150.json", cutoff=0.1, *args, **kwargs):
     """
     Read the retrieval heads from the file.
     The retrieval heads are sorted by their retrieval scores in descending order.
@@ -53,7 +53,11 @@ def read_retrieval_head(retrieval_head_file="./Mistral-7B-v0.1.json", cutoff=0.1
     if kwargs.get("random") is not None:
         head_score_list = random.sample(head_score_list, kwargs.get("random"))
     else:
-        i = 0
+        if cutoff > 1:
+            assert int(cutoff) == cutoff, "cutoff should be an integer if it is greater than 1."
+            print(f"Keeping maximum {cutoff} heads.")
+            return head_score_list[:int(cutoff)]
+
         for i, (head, score) in enumerate(head_score_list):
             if score < cutoff:
                 print(f"{i} of {len(head_score_list)} heads ({i / len(head_score_list)}) have score at least {cutoff}")
@@ -135,7 +139,7 @@ def diff(model1, model2):  # compare two models
 ######################################
 
 ###### arguments ######
-merge_model1 = False
+merge_model1 = True
 cutoff = 0.0
 rescale = True
 save_model = True
@@ -178,7 +182,7 @@ def get_merging_method():
 
 
 model1_path = "../models/Eurus-7b-sft"  # hard-coded
-model2_path = "../models/MistralLite"  # hard-coded
+model2_path = "../models/Mistral-7B-32k-100"  # hard-coded
 base_model_path = "../models/Mistral-7B-v0.1"  # hard-coded
 
 base_enc = AutoTokenizer.from_pretrained(base_model_path)
@@ -478,13 +482,31 @@ def do_model_merge():
     copy_params_to_model(params=merged_params1, model=model_to_merge)
 
     if save_model:
-        save_path = (f"../models/{base_name()}_{cutoff}_keep_{len(retrieval_heads)}_"
+        def simplify_name(name):
+            a, b = name.split("_keep_")
+            cutoff = a.split("_")[-1]
+            keep, others = b.split("_", maxsplit=1)
+            if cutoff == keep:
+                name = a + others
+            if name.find("rescale_True_") != -1:
+                name = name.replace("rescale_True_", "")
+            if name.find("substitute_io_False_") != -1:
+                name = name.replace("substitute_io_False_", "")
+            if name.find("substitute_linear_True_") != -1:
+                name = name.replace("substitute_linear_True_", "")
+            if name.find("resized_False_") != -1:
+                name = name.replace("resized_False_", "")
+            if name.find("linear_rescale_True_") != -1:
+                name = name.replace("linear_rescale_True_", "")
+            return name
+        save_path = (f"../models/a{base_name()}_{cutoff}_keep_{len(retrieval_heads)}_"
                      f"rescale_{rescale}_substitute_io_{substitute_io}_substitute_linear_{substitute_linear}_"
                      f"resized_{resize_tokenizer}_lkr_{linear_keep_rate}_linear_rescale_{linear_rescale}_"
                      f"{get_merging_method()}_linear_merging_method_{linear_merging_method}_mlpk_"
                      f"{mlp_block_keep_configs['gate_proj']}_{mlp_block_keep_configs['up_proj']}_"
                      f"{mlp_block_keep_configs['down_proj']}_"
                      f"krdf_{mlp_block_keep_configs['keep_retrieval_distribution']}")
+        save_path = simplify_name(save_path)
         model_to_merge.save_pretrained(save_path)
         enc_to_merge.save_pretrained(save_path)
         print("Model saved to: ", save_path)
@@ -507,15 +529,15 @@ def do_model_merge():
 # print(test_model_completion(enc2, model2, "[User] Write a python code that solves the problem: given a list of numbers, find the maximum and minimum elements. Your code should be a function that takes a list as the only argument, and return a tuple, which consists of four numbers: the maximum value, the index where the first maximum value appears, the minimum value, and the index where the first minimum value appears. [Assistant]"))
 #
 
-
-cutoffs = [0.03]
+merge_model1 = False
+cutoffs = [120, 500, 750, 1024]
 substitute_ios = [False]
-substitute_linears = [True]
-linear_keep_rates = [0.1]
+substitute_linears = [True, False][0:1]
+linear_keep_rates = [0, 0.1, 1][-1:]
 linear_rescales = [True]
-merging_methods = ["double_delta", "simple_delta", "double_sample", "double_sample_exclusive"][1:2]
-linear_merging_methods = ["double_delta", "simple_delta", "double_sample"][1:2]
-double_sample_cnts = [120]
+merging_methods = ["double_delta", "simple_delta", "double_sample", "double_sample_exclusive"][2:3]
+linear_merging_methods = ["double_delta", "simple_delta", "double_sample"][2:3]
+double_sample_cnts = [120, 240, 512, 1024][-1:]
 mlp_block_keep_configs_gates = [True, False][1:2]
 mlp_block_keep_configs_up = [True, False][1:2]
 mlp_block_keep_configs_down = [True, False][1:2]
